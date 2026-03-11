@@ -9,7 +9,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { 
     Cpu, LogOut, ShieldCheck, Activity, User, X, 
     Database, List, Trash2, Key, Settings, 
-    Plus, LayoutDashboard, Package, Server, Zap, CheckCircle2, Terminal
+    Plus, LayoutDashboard, Package, Server, Zap, CheckCircle2, Terminal, TrendingUp
 } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
@@ -22,6 +22,7 @@ export default function SmartIndex() {
     const [activeMenu, setActiveMenu] = useState('dashboard');
     const [products, setProducts] = useState([]);
     const [accounts, setAccounts] = useState([]);
+    const [orderHistory, setOrderHistory] = useState([]); // Database riwayat cuan
     const [showClaim, setShowClaim] = useState(false);
     const [invoice, setInvoice] = useState("");
     const [accessData, setAccessData] = useState(null);
@@ -33,16 +34,20 @@ export default function SmartIndex() {
     useEffect(() => {
         // Real-time listener untuk Inventory
         const unsubInv = onSnapshot(collection(db, 'inventory'), (snap) => {
-            const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-            setProducts(data.sort((a,b) => (a.price || 0) - (b.price || 0)));
-        }, (error) => console.error("Inventory Sync Error:", error));
+            setProducts(snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b) => (a.price || 0) - (b.price || 0)));
+        });
 
         // Real-time listener untuk Accounts
         const unsubAcc = onSnapshot(collection(db, 'accounts'), (snap) => {
             setAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-        }, (error) => console.error("Account Sync Error:", error));
+        });
 
-        return () => { unsubInv(); unsubAcc(); };
+        // Real-time listener untuk History Orders (Cuan Tracker)
+        const unsubOrders = onSnapshot(collection(db, 'orders'), (snap) => {
+            setOrderHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b) => b.createdAt - a.createdAt));
+        });
+
+        return () => { unsubInv(); unsubAcc(); unsubOrders(); };
     }, []);
 
     // --- FUNGSI ADMIN ---
@@ -50,24 +55,14 @@ export default function SmartIndex() {
         if(!newProdName || !newProdPrice) return alert("System Error: Nama dan Harga wajib diisi!");
         setLoadingAction(true);
         try {
-            await setDoc(doc(db, 'inventory', `PROD-${Date.now()}`), { 
-                name: newProdName, 
-                price: Number(newProdPrice) 
-            });
+            await setDoc(doc(db, 'inventory', `PROD-${Date.now()}`), { name: newProdName, price: Number(newProdPrice) });
             setNewProdName(""); setNewProdPrice(""); 
         } catch (err) { alert(err.message); }
         setLoadingAction(false);
     };
 
-    const handleDeleteProduct = async (id) => { 
-        if(confirm("Hapus protokol produk ini?")) await deleteDoc(doc(db, 'inventory', id)); 
-    };
-
-    const updatePrice = async (id, newPrice) => {
-        try {
-            await updateDoc(doc(db, 'inventory', id), { price: Number(newPrice) });
-        } catch (err) { console.error(err); }
-    };
+    const handleDeleteProduct = async (id) => { if(confirm("Hapus protokol produk ini?")) await deleteDoc(doc(db, 'inventory', id)); };
+    const updatePrice = async (id, newPrice) => await updateDoc(doc(db, 'inventory', id), { price: Number(newPrice) });
 
     const handleBulkImport = async () => {
         if(!bulkText) return alert("System Error: Masukkan format user|pass");
@@ -79,51 +74,31 @@ export default function SmartIndex() {
             lines.forEach(line => {
                 const [u, p] = line.split('|');
                 if(u && p) {
-                    batch.set(doc(db, 'accounts', `NODE-${Math.random().toString(36).substr(2, 5).toUpperCase()}`), { 
-                        user: u.trim(), 
-                        pass: p.trim(), 
-                        status: 'ready' 
-                    });
+                    batch.set(doc(db, 'accounts', `NODE-${Math.random().toString(36).substr(2, 5).toUpperCase()}`), { user: u.trim(), pass: p.trim(), status: 'ready' });
                     count++;
                 }
             });
-            await batch.commit(); 
-            setBulkText(""); 
-            alert(`Data Uploaded: ${count} Node berhasil disuntikkan!`);
+            await batch.commit(); setBulkText(""); alert(`Data Uploaded: ${count} Node berhasil disuntikkan!`);
         } catch (err) { alert(err.message); }
         setLoadingAction(false);
     };
 
-    const handleDeleteAccount = async (id) => { 
-        if(confirm("Hapus node ini permanen?")) await deleteDoc(doc(db, 'accounts', id)); 
-    };
+    const handleDeleteAccount = async (id) => { if(confirm("Hapus node ini permanen?")) await deleteDoc(doc(db, 'accounts', id)); };
 
     // --- FUNGSI PEMBELI ---
     const handleClaim = async () => {
         if(!user) return router.push('/login');
         if(!invoice) return alert("Masukkan Nomor Invoice Lynk.id");
-        
         setLoadingAction(true);
         try {
             const orderRef = doc(db, 'orders', invoice);
             const orderSnap = await getDoc(orderRef);
-
-            if (!orderSnap.exists()) { 
-                setLoadingAction(false); 
-                return alert("ACCESS DENIED: Invoice tidak ditemukan dalam matriks."); 
-            }
-            if (orderSnap.data().status !== 'paid') { 
-                setLoadingAction(false); 
-                return alert("ACCESS DENIED: Otorisasi pembayaran belum selesai."); 
-            }
-            if (orderSnap.data().claimed === true) { 
-                setLoadingAction(false); 
-                return alert("ACCESS DENIED: Invoice telah digunakan sebelumnya."); 
-            }
+            if (!orderSnap.exists()) { setLoadingAction(false); return alert("ACCESS DENIED: Invoice tidak ditemukan."); }
+            if (orderSnap.data().status !== 'paid') { setLoadingAction(false); return alert("ACCESS DENIED: Belum lunas."); }
+            if (orderSnap.data().claimed === true) { setLoadingAction(false); return alert("ACCESS DENIED: Sudah diklaim."); }
 
             const q = query(collection(db, 'accounts'), where("status", "==", "ready"), limit(1));
             const snap = await getDocs(q);
-            
             if(!snap.empty) {
                 const acc = snap.docs[0];
                 const batch = writeBatch(db);
@@ -131,28 +106,20 @@ export default function SmartIndex() {
                     status: 'in_use', 
                     currentUser: user.email, 
                     invoiceRef: invoice, 
-                    claimedAt: new Date() 
+                    claimedAt: new Date(),
+                    packageName: orderSnap.data().packageName || "Premium Package",
+                    customerName: orderSnap.data().customerName || "User",
+                    customerPhone: orderSnap.data().customerPhone || "-",
+                    expiredAt: orderSnap.data().expiredAt || null,
+                    amount: orderSnap.data().amount || 0
                 });
-                batch.update(orderRef, { 
-                    claimed: true, 
-                    claimedBy: user.email, 
-                    accountId: acc.id, 
-                    claimedAt: new Date() 
-                });
+                batch.update(orderRef, { claimed: true, claimedBy: user.email, accountId: acc.id, claimedAt: new Date() });
                 await batch.commit();
                 setAccessData(acc.data());
-            } else { 
-                alert("SYSTEM BUSY: Semua node penuh. Silakan masuk dalam antrean."); 
-            }
-        } catch (error) { 
-            alert("Sistem Database sibuk. Coba lagi."); 
-        }
+            } else { alert("SYSTEM BUSY: Stok akun sedang kosong."); }
+        } catch (error) { alert("Sistem Database sibuk."); }
         setLoadingAction(false);
     };
-
-    // Variasi Animasi
-    const fadeUp = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0 } };
-    const stagger = { hidden: { opacity: 0 }, visible: { opacity: 1, transition: { staggerChildren: 0.1 } } };
 
     if (loading) return <div style={s.loadingScreen}>INITIALIZING DIGIMART CORE...</div>;
 
@@ -178,54 +145,87 @@ export default function SmartIndex() {
                 <main style={s.adminMain}>
                     <header style={s.adminTopBar}>
                         <div>
-                            <h2 style={{margin:0, fontSize:'24px', fontWeight:'900'}}>Digimart Command Server</h2>
-                            <p style={{margin:'5px 0 0 0', fontSize:'12px', color:'#666'}}>Sistem Kendali Utama & Manajemen Node Otomatis.</p>
+                            <h2 style={{margin:0, fontSize:'24px', fontWeight:'900'}}>Command Center</h2>
+                            <p style={{margin:'5px 0 0 0', fontSize:'12px', color:'#666'}}>Dashboard monitoring pusat kendali Digimart.</p>
                         </div>
                         <div style={s.adminBadge}><ShieldCheck size={16} color="#10b981"/> Overlord Active</div>
                     </header>
 
                     <AnimatePresence mode="wait">
-                        <motion.div key={activeMenu} initial={{opacity:0, y:10}} animate={{opacity:1, y:0}} exit={{opacity:0, y:-10}} transition={{duration:0.2}}>
+                        <motion.div key={activeMenu} initial={{opacity:0, y:10}} animate={{opacity:1, y:0}} exit={{opacity:0, y:-10}}>
+                            
                             {activeMenu === 'dashboard' && (
-                                <div style={s.statsGrid}>
-                                    <div style={s.statCard}>
-                                        <div style={s.statHeader}><Package color="#3b82f6"/><span style={s.statLabel}>Total Protokol</span></div>
-                                        <div style={s.statNumber}>{products.length}</div>
+                                <div style={s.adminGridPro}>
+                                    {/* ANALYTICS ROW */}
+                                    <div style={s.statsGrid}>
+                                        <div style={s.statCardPro}>
+                                            <div style={{...s.statIcon, background:'rgba(59,130,246,0.1)'}}><TrendingUp size={24} color="#3b82f6"/></div>
+                                            <div>
+                                                <div style={s.statLabel}>Total Revenue</div>
+                                                <div style={s.statValue}>Rp {orderHistory.reduce((acc, curr) => acc + (curr.amount || 0), 0).toLocaleString('id-ID')}</div>
+                                            </div>
+                                        </div>
+                                        <div style={s.statCardPro}>
+                                            <div style={{...s.statIcon, background:'rgba(16,185,129,0.1)'}}><Activity size={24} color="#10b981"/></div>
+                                            <div>
+                                                <div style={s.statLabel}>Success Claims</div>
+                                                <div style={s.statValue}>{orderHistory.filter(o => o.claimed).length} Sessions</div>
+                                            </div>
+                                        </div>
+                                        <div style={s.statCardPro}>
+                                            <div style={{...s.statIcon, background:'rgba(250,204,21,0.1)'}}><Database size={24} color="#facc15"/></div>
+                                            <div>
+                                                <div style={s.statLabel}>Ready Nodes</div>
+                                                <div style={s.statValue}>{accounts.filter(a => a.status === 'ready').length} Unit</div>
+                                            </div>
+                                        </div>
                                     </div>
-                                    <div style={s.statCard}>
-                                        <div style={s.statHeader}><Database color="#8b5cf6"/><span style={s.statLabel}>Total Node</span></div>
-                                        <div style={s.statNumber}>{accounts.length}</div>
-                                    </div>
-                                    <div style={s.statCard}>
-                                        <div style={s.statHeader}><Activity color="#10b981"/><span style={s.statLabel}>Standby Nodes</span></div>
-                                        <div style={s.statNumber}>{accounts.filter(a => a.status === 'ready').length}</div>
-                                    </div>
-                                    <div style={s.statCard}>
-                                        <div style={s.statHeader}><Zap color="#ef4444"/><span style={s.statLabel}>Active Nodes</span></div>
-                                        <div style={s.statNumber}>{accounts.filter(a => a.status === 'in_use').length}</div>
+
+                                    {/* LOGS & HEALTH ROW */}
+                                    <div style={s.dashboardFlex}>
+                                        <div style={{...s.cardAdminLg, flex: 2}}>
+                                            <h3 style={s.cardTitle}>Live Order Logs</h3>
+                                            <div style={s.logContainer}>
+                                                {orderHistory.length === 0 ? <p style={{opacity:0.2}}>Menunggu data...</p> : orderHistory.slice(0, 8).map(order => (
+                                                    <div key={order.id} style={s.logItem}>
+                                                        <div style={s.logTime}>{order.createdAt?.toDate().toLocaleTimeString()}</div>
+                                                        <div style={s.logInfo}><b>{order.customerName || 'Guest'}</b> beli {order.packageName || 'Paket'}</div>
+                                                        <div style={{...s.logBadge, background: order.claimed ? 'rgba(16,185,129,0.1)' : 'rgba(59,130,246,0.1)', color: order.claimed ? '#10b981' : '#3b82f6'}}>
+                                                            {order.claimed ? 'CLAIMED' : 'PAID'}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+
+                                        <div style={{...s.cardAdminLg, flex: 1}}>
+                                            <h3 style={s.cardTitle}>System Health</h3>
+                                            <div style={s.healthItem}><span>Firestore Engine</span> <span style={{color:'#10b981'}}>● ONLINE</span></div>
+                                            <div style={s.healthItem}><span>Webhook API</span> <span style={{color:'#10b981'}}>● ACTIVE</span></div>
+                                            <div style={s.healthItem}><span>Auth Service</span> <span style={{color:'#10b981'}}>● SECURE</span></div>
+                                            <div style={{marginTop:'30px', padding:'15px', background:'rgba(255,255,255,0.02)', borderRadius:'12px', fontSize:'11px', color:'#555', lineHeight:'1.5'}}>
+                                                Sistem berjalan pada protokol terenkripsi. Semua transaksi diverifikasi secara otomatis oleh Webhook Core.
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             )}
 
                             {activeMenu === 'catalog' && (
                                 <div style={s.cardAdminLg}>
-                                    <h3 style={s.cardTitle}>Registrasi Protokol Harga</h3>
+                                    <h3 style={s.cardTitle}>Manajemen Katalog</h3>
                                     <div style={{display:'flex', gap:'15px', marginBottom:'30px'}}>
-                                        <input style={s.inText} placeholder="Nama Paket (cth: UnlockTool / 11 Jam)" value={newProdName} onChange={e=>setNewProdName(e.target.value)} />
-                                        <input style={s.inText} type="number" placeholder="Harga (cth: 15000)" value={newProdPrice} onChange={e=>setNewProdPrice(e.target.value)} />
-                                        <motion.button whileHover={{scale:1.05}} whileTap={{scale:0.95}} onClick={handleAddProduct} style={s.btnBlueSmall} disabled={loadingAction}><Plus size={18}/> INJECT</motion.button>
+                                        <input style={s.inText} placeholder="Nama Paket" value={newProdName} onChange={e=>setNewProdName(e.target.value)} />
+                                        <input style={s.inText} type="number" placeholder="Harga" value={newProdPrice} onChange={e=>setNewProdPrice(e.target.value)} />
+                                        <button onClick={handleAddProduct} style={s.btnBlueSmall} disabled={loadingAction}><Plus size={18}/> INJECT</button>
                                     </div>
                                     <div style={s.tableContainer}>
                                         {products.map(p => (
                                             <div key={p.id} style={s.rowAdmin}>
-                                                <div style={{display:'flex', alignItems:'center', gap:'15px'}}>
-                                                    <div style={s.iconSmall}><Package size={14} color="#3b82f6"/></div>
-                                                    <span style={{fontWeight:'bold', fontSize:'14px'}}>{p.name || "Unnamed Product"}</span>
-                                                </div>
+                                                <span style={{fontWeight:'bold'}}>{p.name}</span>
                                                 <div style={{display:'flex', gap:'15px', alignItems:'center'}}>
-                                                    <span style={{fontSize:'12px', color:'#666'}}>IDR</span>
                                                     <input style={s.inPrice} defaultValue={p.price} onBlur={(e) => updatePrice(p.id, e.target.value)} />
-                                                    <motion.div whileHover={{scale:1.2}} onClick={() => handleDeleteProduct(p.id)} style={{cursor:'pointer', padding:'5px'}}><Trash2 size={16} color="#ef4444"/></motion.div>
+                                                    <Trash2 size={16} color="#ef4444" onClick={() => handleDeleteProduct(p.id)} style={{cursor:'pointer'}}/>
                                                 </div>
                                             </div>
                                         ))}
@@ -236,27 +236,27 @@ export default function SmartIndex() {
                             {activeMenu === 'nodes' && (
                                 <div style={s.nodesGrid}>
                                     <div style={s.cardAdminLg}>
-                                        <h3 style={s.cardTitle}>Data Injection Matrix</h3>
-                                        <p style={{fontSize:'12px', color:'#666', marginBottom:'15px'}}>Format <code style={{color:'#3b82f6'}}>username|password</code> per baris.</p>
-                                        <textarea style={s.textarea} value={bulkText} onChange={e => setBulkText(e.target.value)} placeholder="user1|pass123&#10;user2|pass456" />
-                                        <motion.button whileHover={{scale:1.02}} whileTap={{scale:0.98}} onClick={handleBulkImport} style={s.btnBlueFull} disabled={loadingAction}>{loadingAction ? "UPLOADING TO MATRIX..." : "PUSH STOK KE DATABASE"}</motion.button>
+                                        <h3 style={s.cardTitle}>Bulk Inject Account</h3>
+                                        <textarea style={s.textarea} value={bulkText} onChange={e => setBulkText(e.target.value)} placeholder="user|pass" />
+                                        <button onClick={handleBulkImport} style={s.btnBlueFull} disabled={loadingAction}>PUSH STOK KE MATRIX</button>
                                     </div>
                                     <div style={s.cardAdminLg}>
-                                        <h3 style={s.cardTitle}>Active Node Telemetry</h3>
-                                        <div style={{maxHeight:'400px', overflowY:'auto', paddingRight:'10px'}}>
-                                            {accounts.length === 0 ? <p style={{fontSize:'12px', opacity:0.3}}>Database kosong.</p> : accounts.map(acc => (
+                                        <h3 style={s.cardTitle}>Live Node Pool</h3>
+                                        <div style={{maxHeight:'400px', overflowY:'auto'}}>
+                                            {accounts.map(acc => (
                                                 <div key={acc.id} style={s.rowAdmin}>
                                                     <div>
-                                                        <div style={{fontWeight:'bold', fontSize:'13px', letterSpacing:'0.5px'}}>{acc.user}</div>
-                                                        <div style={{fontSize:'10px', marginTop:'4px', color: acc.status === 'ready' ? '#10b981' : '#facc15', background: acc.status === 'ready' ? 'rgba(16,185,129,0.1)' : 'rgba(250,204,21,0.1)', display:'inline-block', padding:'3px 8px', borderRadius:'10px', fontWeight:'bold'}}>{(acc.status || "").toUpperCase()}</div>
+                                                        <div style={{fontSize:'13px', fontWeight:'bold'}}>{acc.user}</div>
+                                                        <div style={{fontSize:'10px', color: acc.status === 'ready' ? '#10b981' : '#facc15'}}>{acc.status.toUpperCase()}</div>
                                                     </div>
-                                                    <motion.div whileHover={{scale:1.2}} onClick={() => handleDeleteAccount(acc.id)} style={{cursor:'pointer', padding:'5px'}}><Trash2 size={16} color="#ef4444"/></motion.div>
+                                                    <Trash2 size={16} color="#ef4444" onClick={() => handleDeleteAccount(acc.id)} style={{cursor:'pointer'}}/>
                                                 </div>
                                             ))}
                                         </div>
                                     </div>
                                 </div>
                             )}
+
                         </motion.div>
                     </AnimatePresence>
                 </main>
@@ -264,109 +264,67 @@ export default function SmartIndex() {
         );
     }
 
-    // --- RENDER PEMBELI ---
+    // --- RENDER STOREFRONT (PEMBELI) ---
     return (
         <div style={s.storeContainer}>
             <div style={s.cyberGrid}></div>
-            <div style={s.glowBlue}></div>
-            
             <nav style={s.storeNav}>
-                <div style={s.logoStore}>
-                    <div style={{...s.logoIcon, background:'rgba(59, 130, 246, 0.2)'}}><Cpu size={20} color="#3b82f6"/></div>
-                    Digimart<b style={{color:'#fff'}}>Indonesia</b>
-                </div>
+                <div style={s.logoStore}><div style={s.logoIcon}><Cpu size={20}/></div> Digimart<b>Indonesia</b></div>
                 {user ? (
-                    <div style={{display:'flex', alignItems:'center', gap:'15px'}}>
-                        <Link href="/member" style={{textDecoration:'none'}}>
-                            <motion.div whileHover={{scale:1.05}} style={{...s.userBadgeStore, background:'rgba(59,130,246,0.1)', border:'1px solid rgba(59,130,246,0.2)', color:'#3b82f6'}}>
-                                <Key size={14}/> <span>PORTAL MEMBER</span>
-                            </motion.div>
-                        </Link>
-                        <motion.div whileHover={{scale:1.05}} style={s.userBadgeStore}>
-                            <User size={14}/> <span>{(user.email || "").split('@')[0]}</span> 
-                            <div style={{width:'1px', height:'12px', background:'#333', margin:'0 5px'}}></div>
-                            <LogOut size={14} onClick={() => signOut(auth)} style={{cursor:'pointer', color:'#ef4444'}}/>
-                        </motion.div>
+                    <div style={{display:'flex', gap:'15px', alignItems:'center'}}>
+                        <Link href="/member" style={s.userBadgeStore}><Key size={14}/> PORTAL MEMBER</Link>
+                        <LogOut size={16} onClick={() => signOut(auth)} style={{cursor:'pointer', color:'#ef4444'}}/>
                     </div>
                 ) : (
-                    <motion.button whileHover={{scale:1.05}} whileTap={{scale:0.95}} onClick={() => router.push('/login')} style={s.loginBtn}>SYSTEM LOGIN</motion.button>
+                    <button onClick={() => router.push('/login')} style={s.loginBtn}>SYSTEM LOGIN</button>
                 )}
             </nav>
 
             <main style={s.storeMain}>
                 <header style={s.hero}>
-                    <motion.div initial={{opacity:0, scale:0.8}} animate={{opacity:1, scale:1}} style={s.liveBadge}>
-                        <motion.div animate={{scale:[1, 1.5, 1], opacity:[1, 0.5, 1]}} transition={{repeat:Infinity, duration:2}} style={s.dotGlow}></motion.div>
-                        DIGIMART PROTOCOL ONLINE
-                    </motion.div>
-                    <motion.h1 initial={{opacity:0, y:20}} animate={{opacity:1, y:0}} transition={{delay:0.1}} style={s.h1}>
-                        Secure <span style={s.textGradient}>Node Protocol.</span>
-                    </motion.h1>
-                    <motion.p initial={{opacity:0, y:20}} animate={{opacity:1, y:0}} transition={{delay:0.2}} style={s.heroSub}>
-                        Gerbang akses node terenkripsi. Lakukan otorisasi pembayaran dan dapatkan kredensial eksekusi sistem dalam hitungan milidetik.
-                    </motion.p>
+                    <h1 style={s.h1}>Secure <span style={s.textGradient}>Node Protocol.</span></h1>
+                    <p style={{color:'#666', maxWidth:'500px', margin:'0 auto'}}>Otorisasi pembayaran dan dapatkan akses premium dalam hitungan detik.</p>
                 </header>
 
-                <motion.div variants={stagger} initial="hidden" animate="visible" style={s.gridStore}>
-                    {products.length === 0 ? <p style={{textAlign:'center', width:'100%', opacity:0.3, gridColumn:'1/-1'}}>Protokol tidak tersedia saat ini.</p> : products.map(p => (
-                        <motion.div variants={fadeUp} key={p.id} style={s.cardStore}>
-                            <div style={s.cardTop}>
-                                <div style={s.tagStore}>{(p.name || "").includes('/') ? p.name.split('/')[1] : 'SESS'}</div>
-                                <Activity size={16} color="#3b82f6" opacity={0.5}/>
-                            </div>
-                            <h3 style={s.prodName}>{(p.name || "Package").split('/')[0]}</h3>
+                <div style={s.gridStore}>
+                    {products.map(p => (
+                        <div key={p.id} style={s.cardStore}>
+                            <div style={s.tagStore}>{(p.name || "").split('/')[1] || 'PREMIUM'}</div>
+                            <h3 style={s.prodName}>{(p.name || "").split('/')[0]}</h3>
                             <div style={s.priceBox}>
-                                <span style={{fontSize:'14px', color:'#666', fontWeight:'bold'}}>IDR</span>
+                                <span style={{fontSize:'14px', color:'#444'}}>IDR</span>
                                 <span style={s.priceText}>{(p.price || 0).toLocaleString('id-ID')}</span>
                             </div>
-                            <motion.button whileHover={{scale:1.02, background:'rgba(59, 130, 246, 0.1)', borderColor:'#3b82f6'}} whileTap={{scale:0.98}} onClick={() => setShowClaim(true)} style={s.btnClaimStore}>
-                                <Key size={16}/> REQUEST ACCESS
-                            </motion.button>
-                        </motion.div>
+                            <button onClick={() => setShowClaim(true)} style={s.btnClaimStore}><Key size={16}/> REQUEST ACCESS</button>
+                        </div>
                     ))}
-                </motion.div>
+                </div>
             </main>
 
+            {/* MODAL KLAIM */}
             <AnimatePresence>
                 {showClaim && (
                     <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} style={s.overlay}>
-                        <motion.div initial={{scale:0.9, y:20}} animate={{scale:1, y:0}} exit={{scale:0.9, y:20}} style={s.modalCyber}>
+                        <motion.div initial={{scale:0.9}} animate={{scale:1}} style={s.modalCyber}>
                             <div style={s.modalHeader}>
-                                <div style={{display:'flex', gap:'8px', alignItems:'center'}}>
-                                    <ShieldCheck size={18} color="#10b981"/>
-                                    <span style={{fontSize:'12px', fontWeight:'900', letterSpacing:'1px', color:'#fff'}}>ENCRYPTED AUTHENTICATION</span>
-                                </div>
-                                <X onClick={() => {setShowClaim(false); setAccessData(null);}} style={{cursor:'pointer', opacity:0.5}} size={18}/>
+                                <b>ENCRYPTED AUTHENTICATION</b>
+                                <X onClick={() => {setShowClaim(false); setAccessData(null);}} style={{cursor:'pointer'}} size={18}/>
                             </div>
                             <div style={s.modalBody}>
-                                {!user ? (
-                                    <div style={{textAlign:'center', padding:'20px 0'}}>
-                                        <LockIcon />
-                                        <p style={{fontSize:'13px', color:'#888', marginBottom:'25px'}}>Clearance dibutuhkan. Silakan login terlebih dahulu untuk mengakses matriks ini.</p>
-                                        <motion.button whileHover={{scale:1.02}} whileTap={{scale:0.98}} onClick={() => router.push('/login')} style={s.btnBlueFull}>SYSTEM LOGIN</motion.button>
+                                {accessData ? (
+                                    <div style={{textAlign:'center'}}>
+                                        <div style={s.successBadge}>ACCESS GRANTED</div>
+                                        <div style={s.resultBox}>
+                                            <div style={s.resRow}><span>USER</span> <b>{accessData.user}</b></div>
+                                            <div style={s.resRow}><span>PASS</span> <b>{accessData.pass}</b></div>
+                                        </div>
+                                        <p style={{fontSize:'10px', color:'#ef4444', marginTop:'15px'}}>* Segera gunakan. Sesi akan kadaluarsa sesuai paket.</p>
                                     </div>
-                                ) : accessData ? (
-                                    <motion.div initial={{opacity:0}} animate={{opacity:1}}>
-                                        <div style={{textAlign:'center', marginBottom:'20px'}}>
-                                            <div style={{display:'inline-flex', padding:'10px', borderRadius:'50%', background:'rgba(16,185,129,0.1)', marginBottom:'10px'}}><CheckCircle2 size={30} color="#10b981"/></div>
-                                            <h3 style={{margin:0, color:'#10b981'}}>ACCESS GRANTED</h3>
-                                        </div>
-                                        <div style={s.successBox}>
-                                            <div style={s.dataRow}><small style={{color:'#666', fontWeight:'bold'}}>USERNAME</small> <b style={{fontSize:'16px', color:'#fff'}}>{accessData.user}</b></div>
-                                            <div style={s.dataRow}><small style={{color:'#666', fontWeight:'bold'}}>PASSWORD</small> <b style={{fontSize:'16px', color:'#fff'}}>{accessData.pass}</b></div>
-                                        </div>
-                                        <p style={s.warnText}>* PERINGATAN: Modifikasi password atau *multiple login* akan memicu protokol pemblokiran otomatis.</p>
-                                    </motion.div>
                                 ) : (
                                     <>
-                                        <label style={s.labelCyber}>TRANSACTION HASH / INVOICE LYNK.ID</label>
-                                        <div style={s.inputCyberWrapper}>
-                                            <Terminal size={16} color="#3b82f6"/>
-                                            <input style={s.inputCyber} placeholder="LYNK-XXXXXX" value={invoice} onChange={e => setInvoice(e.target.value)} />
-                                        </div>
-                                        <motion.button whileHover={{scale:1.02}} whileTap={{scale:0.98}} onClick={handleClaim} style={s.btnBlueFull} disabled={loadingAction}>
-                                            {loadingAction ? "DECRYPTING INVOICE..." : "REDEEM KREDENSIAL"}
-                                        </motion.button>
+                                        <label style={s.label}>NOMOR INVOICE LYNK.ID</label>
+                                        <input style={s.inText} placeholder="LYNK-XXXXXX" value={invoice} onChange={e => setInvoice(e.target.value)} />
+                                        <button onClick={handleClaim} style={s.btnBlueFull} disabled={loadingAction}>{loadingAction ? "VERIFYING..." : "REDEEM ACCESS"}</button>
                                     </>
                                 )}
                             </div>
@@ -378,73 +336,74 @@ export default function SmartIndex() {
     );
 }
 
-// Icon Helper
-const LockIcon = () => (
-    <div style={{width:'50px', height:'50px', borderRadius:'50%', background:'rgba(255,255,255,0.05)', display:'flex', alignItems:'center', justifyContent:'center', margin:'0 auto 20px auto'}}>
-        <ShieldCheck size={20} color="#666"/>
-    </div>
-);
-
-// --- STYLES ---
 const s = {
-    cyberGrid: { position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundImage: 'radial-gradient(rgba(255,255,255,0.03) 1px, transparent 0)', backgroundSize: '30px 30px', zIndex: 0, pointerEvents:'none' },
-    glowBlue: { position: 'fixed', top: '-20%', right: '-10%', width: '600px', height: '600px', background: 'radial-gradient(circle, rgba(59,130,246,0.1) 0%, transparent 70%)', filter: 'blur(80px)', zIndex: 0, pointerEvents:'none' },
-    adminContainer: { display:'flex', minHeight:'100vh', background:'#030303', color:'#fff', fontFamily:'Inter, sans-serif' },
-    sidebar: { width:'280px', background:'rgba(10,10,10,0.8)', backdropFilter:'blur(20px)', borderRight:'1px solid rgba(255,255,255,0.05)', padding:'30px 20px', display:'flex', flexDirection:'column', zIndex:10 },
-    logoSidebar: { fontSize:'20px', fontWeight:'950', display:'flex', alignItems:'center', gap:'10px', marginBottom:'50px', paddingLeft:'10px', letterSpacing:'-0.5px' },
-    logoIcon: { background:'linear-gradient(135deg, #3b82f6, #2563eb)', padding:'8px', borderRadius:'12px', display:'flex', alignItems:'center', justifyContent:'center', boxShadow:'0 0 20px rgba(59,130,246,0.3)' },
-    menuList: { display:'flex', flexDirection:'column', gap:'8px', flex:1 },
-    menuItem: { display:'flex', alignItems:'center', gap:'12px', padding:'16px 20px', background:'transparent', border:'none', color:'#666', fontWeight:'bold', borderRadius:'16px', cursor:'pointer', textAlign:'left', textDecoration:'none', fontSize:'13px', transition:'all 0.3s' },
-    menuItemActive: { display:'flex', alignItems:'center', gap:'12px', padding:'16px 20px', background:'linear-gradient(90deg, rgba(59,130,246,0.15) 0%, transparent 100%)', borderLeft:'3px solid #3b82f6', color:'#3b82f6', fontWeight:'bold', borderRadius:'0 16px 16px 0', cursor:'pointer', textAlign:'left', fontSize:'13px' },
-    logoutBtn: { display:'flex', alignItems:'center', gap:'10px', padding:'15px 20px', background:'rgba(239, 68, 68, 0.05)', borderRadius:'16px', color:'#ef4444', fontWeight:'bold', cursor:'pointer', fontSize:'13px', border:'1px solid rgba(239,68,68,0.1)' },
-    adminMain: { flex:1, padding:'40px 50px', position:'relative', zIndex:10, height:'100vh', overflowY:'auto' },
-    adminTopBar: { display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'40px', paddingBottom:'25px', borderBottom:'1px solid rgba(255,255,255,0.05)' },
-    adminBadge: { display:'flex', alignItems:'center', gap:'8px', background:'rgba(16,185,129,0.1)', color:'#10b981', padding:'8px 16px', borderRadius:'30px', border:'1px solid rgba(16,185,129,0.2)', fontSize:'11px', fontWeight:'bold' },
-    statsGrid: { display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(220px, 1fr))', gap:'25px' },
-    statCard: { background:'rgba(15,15,15,0.6)', backdropFilter:'blur(20px)', padding:'30px', borderRadius:'24px', border:'1px solid rgba(255,255,255,0.05)', boxShadow:'0 10px 30px -10px rgba(0,0,0,0.5)' },
-    statHeader: { display:'flex', alignItems:'center', gap:'10px', marginBottom:'20px' },
-    statLabel: { fontSize:'12px', color:'#888', fontWeight:'bold', textTransform:'uppercase', letterSpacing:'1px' },
-    statNumber: { fontSize:'42px', fontWeight:'950', letterSpacing:'-2px' },
-    nodesGrid: { display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(350px, 1fr))', gap:'25px' },
-    cardAdminLg: { background:'rgba(15,15,15,0.6)', backdropFilter:'blur(20px)', padding:'35px', borderRadius:'24px', border:'1px solid rgba(255,255,255,0.05)', marginBottom:'25px', boxShadow:'0 10px 30px -10px rgba(0,0,0,0.5)' },
-    cardTitle: { margin:'0 0 25px 0', fontSize:'18px', fontWeight:'900' },
-    inText: { flex:1, padding:'16px 20px', background:'rgba(0,0,0,0.5)', border:'1px solid rgba(255,255,255,0.08)', color:'#fff', borderRadius:'14px', outline:'none', fontSize:'13px', fontWeight:'bold' },
-    btnBlueSmall: { padding:'0 25px', background:'linear-gradient(135deg, #3b82f6, #2563eb)', color:'#fff', border:'none', borderRadius:'14px', fontWeight:'900', cursor:'pointer', display:'flex', alignItems:'center', gap:'8px', fontSize:'12px', letterSpacing:'1px' },
-    tableContainer: { borderTop:'1px solid rgba(255,255,255,0.05)', paddingTop:'15px' },
-    rowAdmin: { display:'flex', justifyContent:'space-between', alignItems:'center', padding:'18px 0', borderBottom:'1px solid rgba(255,255,255,0.03)' },
-    iconSmall: { background:'rgba(59,130,246,0.1)', padding:'8px', borderRadius:'10px' },
-    inPrice: { width:'100px', background:'rgba(0,0,0,0.5)', border:'1px solid rgba(255,255,255,0.08)', color:'#10b981', textAlign:'center', borderRadius:'10px', padding:'10px', fontWeight:'900', outline:'none', fontSize:'13px' },
-    textarea: { width:'100%', height:'150px', background:'rgba(0,0,0,0.5)', border:'1px solid rgba(255,255,255,0.08)', color:'#3b82f6', borderRadius:'16px', padding:'20px', marginBottom:'20px', resize:'none', outline:'none', fontFamily:'monospace', fontSize:'13px' },
-    btnBlueFull: { width:'100%', padding:'20px', background:'linear-gradient(135deg, #3b82f6, #2563eb)', color:'#fff', border:'none', borderRadius:'16px', fontWeight:'950', cursor:'pointer', fontSize:'13px', letterSpacing:'1px', display:'flex', justifyContent:'center', alignItems:'center', gap:'10px', boxShadow:'0 10px 25px -5px rgba(59,130,246,0.4)' },
-    storeContainer: { position:'relative', background:'#030303', minHeight:'100vh', color:'#fff', fontFamily:'Inter, sans-serif' },
-    storeNav: { position:'relative', zIndex:10, display:'flex', justifyContent:'space-between', alignItems:'center', padding:'25px 5%', borderBottom:'1px solid rgba(255,255,255,0.05)', background:'rgba(3,3,3,0.5)', backdropFilter:'blur(20px)' },
-    logoStore: { fontWeight:'950', display:'flex', alignItems:'center', gap:'10px', fontSize:'20px', letterSpacing:'-0.5px' },
-    userBadgeStore: { display:'flex', alignItems:'center', gap:'10px', background:'rgba(255,255,255,0.05)', padding:'8px 15px', borderRadius:'20px', fontSize:'12px', fontWeight:'bold', border:'1px solid rgba(255,255,255,0.05)' },
-    loginBtn: { background:'#fff', color:'#000', border:'none', padding:'12px 25px', borderRadius:'14px', fontWeight:'900', cursor:'pointer', fontSize:'12px', letterSpacing:'1px' },
-    storeMain: { position:'relative', zIndex:10, maxWidth:'1100px', margin:'0 auto', padding:'80px 20px' },
+    loadingScreen: { height:'100vh', background:'#030303', color:'#3b82f6', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:'950', letterSpacing:'5px' },
+    cyberGrid: { position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundImage: 'radial-gradient(rgba(255,255,255,0.03) 1px, transparent 0)', backgroundSize: '30px 30px', zIndex: 0 },
+    
+    // Admin Styles
+    adminContainer: { display:'flex', minHeight:'100vh', background:'#030303', color:'#fff' },
+    sidebar: { width:'280px', background:'rgba(10,10,10,0.8)', padding:'30px 20px', borderRight:'1px solid #111', zIndex:10 },
+    logoSidebar: { display:'flex', alignItems:'center', gap:'10px', marginBottom:'50px', fontSize:'20px', fontWeight:'900' },
+    logoIcon: { background:'linear-gradient(135deg, #3b82f6, #8b5cf6)', padding:'8px', borderRadius:'10px' },
+    menuList: { display:'flex', flexDirection:'column', gap:'10px' },
+    menuItem: { padding:'15px 20px', borderRadius:'15px', color:'#666', border:'none', background:'transparent', textAlign:'left', display:'flex', alignItems:'center', gap:'10px', cursor:'pointer', textDecoration:'none', fontWeight:'bold' },
+    menuItemActive: { padding:'15px 20px', borderRadius:'15px', color:'#3b82f6', background:'rgba(59,130,246,0.1)', borderLeft:'3px solid #3b82f6', textAlign:'left', display:'flex', alignItems:'center', gap:'10px', fontWeight:'bold' },
+    logoutBtn: { marginTop:'auto', padding:'15px', color:'#ef4444', background:'transparent', border:'none', display:'flex', gap:'10px', cursor:'pointer', fontWeight:'bold' },
+    
+    adminMain: { flex:1, padding:'50px', zIndex:10, height:'100vh', overflowY:'auto' },
+    adminTopBar: { display:'flex', justifyContent:'space-between', marginBottom:'40px' },
+    adminBadge: { background:'rgba(16,185,129,0.1)', color:'#10b981', padding:'8px 15px', borderRadius:'30px', border:'1px solid rgba(16,185,129,0.2)', fontSize:'11px', fontWeight:'bold' },
+    
+    // Pro Admin Components
+    adminGridPro: { display:'flex', flexDirection:'column', gap:'30px' },
+    statsGrid: { display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(250px, 1fr))', gap:'25px' },
+    statCardPro: { background:'rgba(15,15,15,0.6)', padding:'25px', borderRadius:'24px', border:'1px solid rgba(255,255,255,0.05)', display:'flex', alignItems:'center', gap:'20px' },
+    statIcon: { padding:'15px', borderRadius:'15px' },
+    statLabel: { fontSize:'11px', color:'#666', fontWeight:'900', textTransform:'uppercase' },
+    statValue: { fontSize:'22px', fontWeight:'950' },
+    
+    dashboardFlex: { display:'flex', gap:'25px', flexWrap:'wrap' },
+    logContainer: { display:'flex', flexDirection:'column', gap:'12px' },
+    logItem: { display:'flex', alignItems:'center', gap:'15px', padding:'15px', background:'rgba(0,0,0,0.3)', borderRadius:'14px', fontSize:'12px' },
+    logTime: { color:'#444', fontFamily:'monospace' },
+    logInfo: { flex:1 },
+    logBadge: { padding:'4px 10px', borderRadius:'8px', fontSize:'10px', fontWeight:'900' },
+    healthItem: { display:'flex', justifyContent:'space-between', padding:'15px 0', borderBottom:'1px solid #111', fontSize:'12px' },
+
+    cardAdminLg: { background:'rgba(15,15,15,0.6)', padding:'30px', borderRadius:'24px', border:'1px solid rgba(255,255,255,0.05)' },
+    cardTitle: { margin:'0 0 25px 0', fontSize:'16px' },
+    inText: { padding:'15px', background:'#000', border:'1px solid #222', borderRadius:'12px', color:'#fff', outline:'none', width:'100%' },
+    btnBlueSmall: { padding:'0 20px', background:'#3b82f6', color:'#fff', border:'none', borderRadius:'12px', fontWeight:'bold', cursor:'pointer' },
+    rowAdmin: { display:'flex', justifyContent:'space-between', padding:'15px 0', borderBottom:'1px solid #111' },
+    inPrice: { width:'80px', background:'#000', border:'1px solid #222', color:'#10b981', textAlign:'center', borderRadius:'8px', padding:'5px' },
+    textarea: { width:'100%', height:'120px', background:'#000', border:'1px solid #222', color:'#3b82f6', padding:'15px', borderRadius:'12px', resize:'none', marginBottom:'15px', fontFamily:'monospace' },
+    btnBlueFull: { width:'100%', padding:'18px', background:'#3b82f6', color:'#fff', border:'none', borderRadius:'15px', fontWeight:'900', cursor:'pointer' },
+
+    // Storefront Styles
+    storeContainer: { background:'#030303', minHeight:'100vh', color:'#fff' },
+    storeNav: { position:'relative', display:'flex', justifyContent:'space-between', padding:'25px 5%', borderBottom:'1px solid #111', zIndex:10 },
+    logoStore: { fontSize:'20px', fontWeight:'950', display:'flex', alignItems:'center', gap:'10px' },
+    userBadgeStore: { background:'rgba(255,255,255,0.05)', padding:'8px 15px', borderRadius:'20px', fontSize:'11px', textDecoration:'none', color:'#fff', fontWeight:'bold' },
+    loginBtn: { background:'#fff', color:'#000', border:'none', padding:'10px 20px', borderRadius:'12px', fontWeight:'bold', cursor:'pointer' },
+    storeMain: { position:'relative', maxWidth:'1100px', margin:'0 auto', padding:'80px 20px', zIndex:10 },
     hero: { textAlign:'center', marginBottom:'80px' },
-    liveBadge: { display:'inline-flex', alignItems:'center', gap:'8px', background:'rgba(16,185,129,0.05)', color:'#10b981', padding:'8px 20px', borderRadius:'30px', fontSize:'11px', fontWeight:'900', border:'1px solid rgba(16,185,129,0.1)', marginBottom:'25px', letterSpacing:'1px' },
-    dotGlow: { width:'6px', height:'6px', background:'#10b981', borderRadius:'50%', boxShadow:'0 0 10px #10b981' },
-    h1: { fontSize:'72px', fontWeight:'950', letterSpacing:'-4px', margin:'0 0 20px 0', lineHeight:'1.1' },
+    h1: { fontSize:'64px', fontWeight:'950', letterSpacing:'-4px' },
     textGradient: { background:'linear-gradient(to right, #3b82f6, #8b5cf6)', WebkitBackgroundClip:'text', color:'transparent' },
-    heroSub: { fontSize:'16px', color:'#888', maxWidth:'600px', margin:'0 auto', lineHeight:'1.6' },
-    gridStore: { display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(300px, 1fr))', gap:'30px' },
-    cardStore: { background:'rgba(15,15,15,0.6)', backdropFilter:'blur(20px)', padding:'40px', borderRadius:'32px', border:'1px solid rgba(255,255,255,0.05)', boxShadow:'0 20px 40px -15px rgba(0,0,0,0.5)' },
-    cardTop: { display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'25px' },
-    tagStore: { background:'rgba(250, 204, 21, 0.1)', color:'#facc15', padding:'6px 14px', borderRadius:'12px', fontSize:'10px', fontWeight:'900', border:'1px solid rgba(250, 204, 21, 0.2)', letterSpacing:'0.5px' },
-    prodName: { margin:'0', fontSize:'26px', fontWeight:'900', letterSpacing:'-0.5px' },
-    priceBox: { display:'flex', alignItems:'flex-start', gap:'5px', margin:'15px 0 35px 0' },
-    priceText: { fontSize:'38px', fontWeight:'950', color:'#3b82f6', lineHeight:'1', letterSpacing:'-2px' },
-    btnClaimStore: { width:'100%', padding:'18px', background:'rgba(255,255,255,0.03)', color:'#fff', border:'1px solid rgba(255,255,255,0.1)', borderRadius:'16px', fontWeight:'900', cursor:'pointer', display:'flex', justifyContent:'center', alignItems:'center', gap:'10px', fontSize:'12px', letterSpacing:'1px', transition:'all 0.3s' },
-    overlay: { position:'fixed', top:0, left:0, width:'100%', height:'100%', background:'rgba(0,0,0,0.8)', backdropFilter:'blur(10px)', zIndex:1000, display:'flex', alignItems:'center', justifyContent:'center' },
-    modalCyber: { background:'#050505', borderRadius:'24px', width:'100%', maxWidth:'420px', border:'1px solid rgba(255,255,255,0.1)', overflow:'hidden', boxShadow:'0 25px 50px -12px rgba(0,0,0,0.8)' },
-    modalHeader: { background:'rgba(255,255,255,0.03)', borderBottom:'1px solid rgba(255,255,255,0.05)', padding:'15px 20px', display:'flex', justifyContent:'space-between', alignItems:'center' },
+    gridStore: { display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(280px, 1fr))', gap:'25px' },
+    cardStore: { background:'rgba(15,15,15,0.6)', padding:'40px', borderRadius:'30px', border:'1px solid #111' },
+    tagStore: { background:'rgba(250,204,21,0.1)', color:'#facc15', fontSize:'9px', padding:'5px 10px', borderRadius:'8px', display:'inline-block', marginBottom:'15px', fontWeight:'900' },
+    prodName: { margin:0, fontSize:'24px', fontWeight:'900' },
+    priceBox: { margin:'15px 0 30px 0', display:'flex', alignItems:'baseline', gap:'10px' },
+    priceText: { fontSize:'36px', fontWeight:'950', color:'#3b82f6' },
+    btnClaimStore: { width:'100%', padding:'15px', background:'rgba(255,255,255,0.03)', color:'#fff', border:'1px solid #222', borderRadius:'14px', fontWeight:'bold', cursor:'pointer' },
+    
+    // Modal Styles
+    overlay: { position:'fixed', top:0, left:0, width:'100%', height:'100%', background:'rgba(0,0,0,0.8)', zIndex:1000, display:'flex', alignItems:'center', justifyContent:'center' },
+    modalCyber: { background:'#050505', borderRadius:'24px', width:'90%', maxWidth:'400px', border:'1px solid #222', overflow:'hidden' },
+    modalHeader: { background:'rgba(255,255,255,0.03)', padding:'15px 20px', display:'flex', justifyContent:'space-between', fontSize:'11px' },
     modalBody: { padding:'30px' },
-    labelCyber: { display:'block', fontSize:'10px', fontWeight:'900', color:'#666', marginBottom:'10px', letterSpacing:'1px' },
-    inputCyberWrapper: { display:'flex', alignItems:'center', gap:'15px', background:'rgba(0,0,0,0.5)', border:'1px solid rgba(255,255,255,0.1)', borderRadius:'16px', padding:'0 20px', marginBottom:'25px', boxShadow:'inset 0 2px 5px rgba(0,0,0,0.5)' },
-    inputCyber: { width:'100%', padding:'20px 0', background:'transparent', border:'none', color:'#fff', outline:'none', fontSize:'16px', fontWeight:'900', letterSpacing:'1px', fontFamily:'monospace' },
-    successBox: { background:'rgba(16,185,129,0.05)', padding:'25px', borderRadius:'16px', border:'1px solid rgba(16,185,129,0.2)' },
-    dataRow: { display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'15px', borderBottom:'1px solid rgba(255,255,255,0.05)', paddingBottom:'10px' },
-    warnText: { fontSize:'10px', color:'#ef4444', marginTop:'20px', textAlign:'center', fontWeight:'bold', letterSpacing:'0.5px' },
-    loadingScreen: { height:'100vh', background:'#030303', color:'#3b82f6', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:'900', letterSpacing:'4px', fontSize:'14px' }
+    label: { display:'block', fontSize:'10px', fontWeight:'900', color:'#444', marginBottom:'10px' },
+    successBadge: { background:'rgba(16,185,129,0.1)', color:'#10b981', padding:'10px', borderRadius:'12px', fontWeight:'900', marginBottom:'20px' },
+    resultBox: { background:'#000', padding:'20px', borderRadius:'15px', border:'1px solid #111' },
+    resRow: { display:'flex', justifyContent:'space-between', marginBottom:'10px' }
 };
